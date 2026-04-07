@@ -1,8 +1,8 @@
 ---
 title: AI Startup Decision Simulator
 emoji: 🚀
-colorFrom: violet
-colorTo: cyan
+colorFrom: purple
+colorTo: blue
 sdk: docker
 app_port: 7860
 pinned: true

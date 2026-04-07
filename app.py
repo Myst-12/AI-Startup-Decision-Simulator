@@ -1,15 +1,15 @@
 """
-app.py — Gradio web interface for the Startup Decision Simulator.
-Runs on port 7860 for Hugging Face Spaces (Docker SDK).
+app.py — Refactored Gradio web interface for the Startup Decision Simulator.
+Features: KPI Dashboard, Live Charts, Strategic Feedback, and Agent Reasoning.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import threading
 import time
-from typing import Any, Dict, List, Optional
+import pandas as pd
+from typing import Any, Dict, List, Optional, Tuple
 
 import gradio as gr
 
@@ -36,7 +36,7 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
 
 # ---------------------------------------------------------------------------
-# LLM client (lazy init so app loads even without key)
+# LLM client (lazy init)
 # ---------------------------------------------------------------------------
 _client = None
 
@@ -49,267 +49,226 @@ def get_client():
 
 
 SYSTEM_PROMPT = """You are an experienced startup founder making strategic weekly decisions.
-Return ONLY a valid JSON object with keys "type" and "payload". No explanations.
+Return ONLY a valid JSON object with keys "type", "payload", and "reasoning".
+"reasoning" should be a short (1-sentence) explanation of your strategy for this step.
 
 Actions:
-- {"type": "hire", "payload": {"role": "engineer"|"designer"|"marketer"}}
-- {"type": "fire", "payload": {"role": "engineer"|"designer"|"marketer"}}
-- {"type": "build_feature", "payload": {"feature_name": "<unique name>"}}
-- {"type": "marketing", "payload": {"budget": <float >= 500>}}
-- {"type": "pivot", "payload": {"new_trend": "AI/ML"|"sustainability"|"consumer_health"|"fintech"|"enterprise_saas"|"creator_economy"|"web3"|"edtech"|"stable"}}
-- {"type": "wait", "payload": {}}
+- {"type": "hire", "payload": {"role": "engineer"|"designer"|"marketer"}, "reasoning": "..."}
+- {"type": "fire", "payload": {"role": "engineer"|"designer"|"marketer"}, "reasoning": "..."}
+- {"type": "build_feature", "payload": {"feature_name": "<unique name>"}, "reasoning": "..."}
+- {"type": "marketing", "payload": {"budget": <float >= 500>}, "reasoning": "..."}
+- {"type": "pivot", "payload": {"new_trend": "AI/ML"|"sustainability"|"enterprise_saas"|"..." }, "reasoning": "..."}
+- {"type": "wait", "payload": {}, "reasoning": "..."}
 
-Build features before marketing. Watch burn rate. Respond to events intelligently."""
+Strategy Tips: Build features before marketing. Watch burn rate. Pivot if competition is too high."""
 
 
-def get_llm_action(obs_dict: Dict, task_desc: str, week: int, max_weeks: int) -> Action:
+def get_llm_action_with_reasoning(obs_dict: Dict, task_desc: str, week: int, max_weeks: int) -> Tuple[Action, str]:
     try:
         client = get_client()
-        prompt = f"TASK: {task_desc}\nWEEK {week}/{max_weeks}\nSTATE:\n{json.dumps(obs_dict, indent=2)}\n\nReturn ONLY the JSON action:"
+        prompt = f"TASK: {task_desc}\nWEEK {week}/{max_weeks}\nSTATE:\n{json.dumps(obs_dict, indent=2)}\n\nReturn JSON action with reasoning:"
         resp = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=128,
+            max_tokens=256,
         )
         raw = resp.choices[0].message.content.strip()
-        if raw.startswith("```"):
+        if "```" in raw:
             raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+            if raw.startswith("json"): raw = raw[4:]
             raw = raw.strip()
-        return Action.from_dict(json.loads(raw))
-    except Exception:
-        return Action.from_dict({"type": "wait", "payload": {}})
+        
+        data = json.loads(raw)
+        return Action.from_dict(data), data.get("reasoning", "No reasoning provided.")
+    except Exception as e:
+        print(f"LLM Error: {e}")
+        return Action.from_dict({"type": "wait", "payload": {}}), "Fallback to wait due to error."
 
 
 # ---------------------------------------------------------------------------
-# Run a task and yield step-by-step log lines
+# Strategic Feedback Heuristics
+# ---------------------------------------------------------------------------
+
+def generate_strategic_feedback(history: List[Dict[str, Any]], final_score: float) -> str:
+    suggestions = []
+    last_obs = history[-1]["obs"]
+    last_info = history[-1]["info"]
+    
+    if last_info.get("done_reason") == "bankruptcy":
+        if last_obs.team.engineers > 3:
+            suggestions.append("⚠️ **Over-hiring Engineering**: You scaled your team faster than your budget could support early on.")
+        if last_obs.metrics.revenue < 1000:
+            suggestions.append("⚠️ **Slow to Market**: You ran out of cash before generating significant revenue. Try shipping features faster.")
+            
+    if last_obs.product.quality < 0.3 and any(h["action"].type == "marketing" for h in history):
+        suggestions.append("⚠️ **Premature Marketing**: You spent heavily on marketing while product quality was low. Focus on R&D (Build Feature) first.")
+
+    if last_obs.metrics.revenue > 10000 and last_obs.metrics.user_growth < 5.0:
+        suggestions.append("💡 **Scale Opportunity**: You have a strong product but slow growth. Consider more aggressive marketing or hiring a Marketer.")
+        
+    if not suggestions:
+        if final_score > 0.8:
+            suggestions.append("🌟 **Excellent Execution**: You balanced growth and survival perfectly.")
+        else:
+            suggestions.append("💡 **Incremental Gains**: Try to balance feature development with consistent marketing to avoid growth plateaus.")
+            
+    return "\n\n".join(suggestions)
+
+
+# ---------------------------------------------------------------------------
+# Task Runner
 # ---------------------------------------------------------------------------
 
 def run_task_streaming(task_name: str):
     task_cfg, grader_fn = get_task_by_name(task_name)
-    config = task_cfg["config"]
-    desc = task_cfg["description"]
-
-    env = StartupEnv(config=config)
+    env = StartupEnv(config=task_cfg["config"])
     obs = env.reset()
-
-    log_lines = []
+    
     history = []
     done = False
-    step = 0
+    
+    # State tracking for charts
+    df_metrics = pd.DataFrame(columns=["Week", "Revenue", "Users"])
+    
+    yield (
+        obs.budget, obs.metrics.revenue, obs.metrics.user_growth, obs.product.quality,
+        df_metrics, "", "", "", gr.update(visible=False)
+    )
 
-    yield f"🚀 **{task_cfg['display_name']}** | Difficulty: `{task_cfg['difficulty']}` | Budget: ${obs.budget:,.0f} | Max Weeks: {obs.time.max_weeks}\n\n"
-    yield f"📋 *{desc}*\n\n"
-    yield "---\n"
-    yield f"| Week | Action | Reward | Budget | Revenue | User Growth | Quality | Event |\n"
-    yield f"|------|--------|--------|--------|---------|-------------|---------|-------|\n"
-
-    while not done and step < config["max_weeks"]:
-        step += 1
+    while not done:
         obs_dict = obs.model_dump()
-        action = get_llm_action(obs_dict, desc, obs.time.current_week, obs.time.max_weeks)
+        action, reasoning = get_llm_action_with_reasoning(
+            obs_dict, task_cfg["description"], obs.time.current_week, obs.time.max_weeks
+        )
+        
         obs, reward, done, info = env.step(action)
         history.append({"obs": obs, "reward": reward, "action": action, "info": info})
-
+        
+        # Update metric tracking
+        new_row = {"Week": obs.time.current_week - 1, "Revenue": obs.metrics.revenue, "Users": obs.metrics.user_growth}
+        df_metrics = pd.concat([df_metrics, pd.DataFrame([new_row])], ignore_index=True)
+        
+        # Event Highlight
         event = info.get("event", "none")
-        event_icon = {"viral_growth": "🚀", "server_crash": "💥", "competitor_launch": "⚔️",
-                      "press_coverage": "📰", "economic_downturn": "📉", "key_employee_left": "👋"}.get(event, "")
-        event_str = f"{event_icon} {event}" if event_icon else event
+        event_banner = ""
+        if event != "none":
+            color = "#ef4444" if event in ["server_crash", "economic_downturn"] else "#10b981"
+            event_banner = f"<div style='background:{color};color:white;padding:8px;border-radius:5px;text-align:center;'>🚀 **EVENT**: {event.replace('_', ' ').upper()}</div>"
 
-        row = (
-            f"| {obs.time.current_week - 1:02d} "
-            f"| `{action.type}` "
-            f"| {reward.total:.3f} "
-            f"| ${obs.budget:,.0f} "
-            f"| ${obs.metrics.revenue:,.0f} "
-            f"| {obs.metrics.user_growth:.1f}% "
-            f"| {obs.product.quality:.2f} "
-            f"| {event_str} |\n"
+        # Insight content
+        why_str = "\n".join([f"• {w}" for w in info.get("why", [])])
+        insights = f"**Agent Reasoning:**\n{reasoning}\n\n**Mechanical Breakdown:**\n{why_str}"
+        
+        # Yield mid-step updates
+        yield (
+            obs.budget, obs.metrics.revenue, obs.metrics.user_growth, obs.product.quality,
+            df_metrics, event_banner, insights, "", gr.update(visible=False)
         )
-        yield row
+        time.sleep(0.5)
 
+    # Final breakdown
     score = grader_fn(history)
-    final = history[-1]["obs"] if history else obs
-    reason = history[-1]["info"].get("done_reason", "unknown") if history else "unknown"
+    feedback = generate_strategic_feedback(history, score)
+    
+    # Generate result markdown
+    surv = 1 if history[-1]["obs"].budget > 0 else 0
+    rev_max = max(h["obs"].metrics.revenue for h in history)
+    ug_max = max(h["obs"].metrics.user_growth for h in history)
+    
+    breakdown_md = f"""
+### 🏁 Run Analysis
+| Component | Score | Weight |
+|---|---|---|
+| **Survival** | {surv}.0 | 40% |
+| **Revenue Peak** | ${rev_max:,.0f} | 30% |
+| **Growth Peak** | {ug_max:.1f}% | 30% |
 
-    reason_icon = {"bankruptcy": "💸", "max_weeks_reached": "🏁", "success_milestone": "🏆"}.get(reason, "❓")
+**Final Balanced Score: `{score:.4f}`**
 
-    yield "\n---\n"
-    yield f"### Results\n"
-    yield f"- **Grader Score:** `{score:.4f}` / 1.0\n"
-    yield f"- **Steps Run:** {step}\n"
-    yield f"- **Done Reason:** {reason_icon} `{reason}`\n"
-    yield f"- **Final Budget:** ${final.budget:,.0f}\n"
-    yield f"- **Final Revenue:** ${final.metrics.revenue:,.0f}/week\n"
-    yield f"- **Features Built:** {', '.join(f'`{f}`' for f in final.product.features_built) or 'none'}\n"
-    yield f"- **Product Quality:** {final.product.quality:.2f}\n"
-
-
-# ---------------------------------------------------------------------------
-# Run all tasks at once
-# ---------------------------------------------------------------------------
-
-def run_all_tasks():
-    all_output = ""
-    scores = []
-
-    for task_cfg, grader_fn in ALL_TASKS:
-        config = task_cfg["config"]
-        desc = task_cfg["description"]
-        env = StartupEnv(config=config)
-        obs = env.reset()
-        history = []
-        done = False
-        step = 0
-        log = []
-
-        log.append(f"### 🏢 {task_cfg['display_name']} (`{task_cfg['difficulty']}`)\n")
-        log.append(f"*{desc}*\n\n")
-        log.append("| Week | Action | Reward | Budget | Revenue |\n")
-        log.append("|------|--------|--------|--------|---------|\n")
-
-        while not done and step < config["max_weeks"]:
-            step += 1
-            obs_dict = obs.model_dump()
-            action = get_llm_action(obs_dict, desc, obs.time.current_week, obs.time.max_weeks)
-            obs, reward, done, info = env.step(action)
-            history.append({"obs": obs, "reward": reward, "action": action, "info": info})
-            log.append(f"| {obs.time.current_week-1:02d} | `{action.type}` | {reward.total:.3f} | ${obs.budget:,.0f} | ${obs.metrics.revenue:,.0f} |\n")
-
-        score = grader_fn(history)
-        scores.append(score)
-        reason = history[-1]["info"].get("done_reason", "unknown") if history else "unknown"
-        final = history[-1]["obs"] if history else obs
-
-        log.append(f"\n**Score:** `{score:.4f}` | **Steps:** {step} | **Done:** `{reason}`\n\n---\n")
-        all_output += "".join(log)
-
-    mean = sum(scores) / len(scores) if scores else 0
-    all_output += f"\n## 📊 Final Summary\n| Task | Score |\n|------|-------|\n"
-    for (tc, _), s in zip(ALL_TASKS, scores):
-        all_output += f"| {tc['display_name']} | `{s:.4f}` |\n"
-    all_output += f"\n**Mean Score: `{mean:.4f}`**\n"
-    return all_output
-
+### 💡 Strategic Feedback
+{feedback}
+"""
+    yield (
+        obs.budget, obs.metrics.revenue, obs.metrics.user_growth, obs.product.quality,
+        df_metrics, "", insights, breakdown_md, gr.update(visible=True)
+    )
 
 # ---------------------------------------------------------------------------
 # Gradio UI
 # ---------------------------------------------------------------------------
 
-TASK_CHOICES = [(f"{tc['display_name']} ({tc['difficulty']})", tc["name"]) for tc, _ in ALL_TASKS]
+# Initial data for charts
+df_metrics_init = pd.DataFrame(columns=["Week", "Revenue", "Users"])
 
 def build_ui():
     with gr.Blocks(
-        title="🚀 Startup Decision Simulator",
-        theme=gr.themes.Soft(primary_hue="violet", secondary_hue="cyan"),
-        css="""
-        .header-box { text-align: center; padding: 20px 0; }
-        .metric-box { border-radius: 10px; padding: 10px; }
-        footer { display: none !important; }
-        """
+        title="🚀 Startup Simulator v2",
+        theme=gr.themes.Default(primary_hue="indigo", secondary_hue="slate"),
+        css=".metric-card { background: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; border-radius: 8px; text-align: center; }"
     ) as demo:
-
-        # ── Header ──────────────────────────────────────────────────────────
-        gr.HTML("""
-        <div class="header-box">
-            <h1 style="font-size:2.2em; margin:0;">🚀 Startup Decision Simulator</h1>
-            <p style="color:#888; font-size:1.1em; margin:6px 0 0;">
-                OpenEnv-Compatible AI Agent Benchmark — Powered by <strong>Llama 3.3 70B via Groq</strong>
-            </p>
-        </div>
-        """)
-
-        # ── Info cards ───────────────────────────────────────────────────────
+        
+        gr.HTML("<h1 style='text-align:center; margin:20px 0;'>🚀 Startup Decision Simulator <span style='font-size:0.5em; vertical-align:middle; background:#6366f1; color:white; padding:4px 8px; border-radius:12px;'>v2 PRO</span></h1>")
+        
         with gr.Row():
-            gr.HTML("""<div style="background:#1e1e2e;border-radius:10px;padding:16px;color:#cdd6f4;">
-                <b>🎯 What this does</b><br>An LLM agent acts as a startup founder, making weekly decisions
-                (hire, build, market, pivot) to maximise revenue and user growth across 3 tasks of increasing difficulty.
-            </div>""")
-            gr.HTML("""<div style="background:#1e1e2e;border-radius:10px;padding:16px;color:#cdd6f4;">
-                <b>⚙️ How it works</b><br>Each step = 1 week. The agent receives the full startup state as JSON
-                and returns a structured action. Stochastic events (viral growth, crashes) add realism.
-            </div>""")
-            gr.HTML("""<div style="background:#1e1e2e;border-radius:10px;padding:16px;color:#cdd6f4;">
-                <b>📊 Scoring</b><br>Dense reward per step (revenue + user growth + quality + efficiency).
-                Final grader score in [0, 1] per task. Mean score across all 3 tasks is the overall benchmark.
-            </div>""")
-
-        gr.Markdown("---")
-
-        # ── Single task tab ──────────────────────────────────────────────────
-        with gr.Tabs():
-            with gr.TabItem("▶️ Run Single Task"):
-                with gr.Row():
-                    task_dropdown = gr.Dropdown(
-                        choices=TASK_CHOICES,
-                        value="mvp_launch",
-                        label="Select Task",
-                        scale=2,
-                    )
-                    run_btn = gr.Button("▶ Run Task", variant="primary", scale=1)
-
-                task_output = gr.Markdown(label="Episode Log", value="*Select a task and click Run Task to start...*")
-
-                run_btn.click(
-                    fn=lambda t: "".join(run_task_streaming(t)),
-                    inputs=task_dropdown,
-                    outputs=task_output,
+            with gr.Column(scale=1):
+                gr.Markdown("### 🎯 Mission Control")
+                task_select = gr.Dropdown(
+                    choices=[(f"{t['display_name']} ({t['difficulty'].upper()})", t["name"]) for t, _ in ALL_TASKS],
+                    value="mvp_launch",
+                    label="Choose Challenge"
                 )
+                mission_desc = gr.Markdown("Goal: Build an MVP and generate revenue.")
+                run_btn = gr.Button("🚀 LAUNCH SIMULATION", variant="primary")
+            
+            with gr.Column(scale=2):
+                with gr.Row():
+                    m_budget = gr.Number(label="Budget ($)", value=0, precision=0, interactive=False)
+                    m_revenue = gr.Number(label="Revenue ($/wk)", value=0, precision=0, interactive=False)
+                    m_growth = gr.Number(label="User Growth (%)", value=0, precision=1, interactive=False)
+                    m_quality = gr.Number(label="Product Quality", value=0, precision=2, interactive=False)
 
-            # ── All tasks tab ────────────────────────────────────────────────
-            with gr.TabItem("🏁 Run All Tasks (Benchmark)"):
-                run_all_btn = gr.Button("▶ Run All 3 Tasks", variant="primary")
-                all_output = gr.Markdown(value="*Click to run the full benchmark across all 3 tasks...*")
-                run_all_btn.click(fn=run_all_tasks, outputs=all_output)
+        event_alert = gr.HTML("")
+        
+        with gr.Row():
+            with gr.Column(scale=2):
+                gr.Markdown("### 📈 Performance Visuals")
+                chart = gr.LinePlot(
+                    df_metrics_init,
+                    x="Week",
+                    y=["Revenue", "Users"],
+                    title="Revenue & Growth Over Time",
+                    width=600,
+                    height=350,
+                    overlay_point=True,
+                    tooltip=["Week", "Revenue", "Users"]
+                )
+            
+            with gr.Column(scale=1):
+                gr.Markdown("### 🧠 Step Insights")
+                insight_panel = gr.Markdown("Simulation not started...")
+        
+        results_panel = gr.Markdown("", visible=False)
+        reset_btn = gr.Button("♻️ Reset & Clear", visible=False)
 
-            # ── Info tab ─────────────────────────────────────────────────────
-            with gr.TabItem("📖 Environment Spec"):
-                gr.Markdown("""
-## Action Space
+        # ── Logic ──────────────────────────────────────────────────────────
+        
+        def update_desc(name):
+            task, _ = get_task_by_name(name)
+            return f"**{task['display_name']}**: {task['description']}"
 
-| Action | Payload | Effect |
-|--------|---------|--------|
-| `hire` | `{role: engineer\|designer\|marketer}` | Adds headcount |
-| `fire` | `{role: engineer\|designer\|marketer}` | Reduces headcount |
-| `build_feature` | `{feature_name: str}` | Ships a feature, boosts quality |
-| `marketing` | `{budget: float ≥ 500}` | Boosts demand & user growth |
-| `pivot` | `{new_trend: str}` | Repositions to a new market |
-| `wait` | `{}` | No action |
-
-## Reward Function
-
-```
-reward = 0.30 × revenue_component
-       + 0.25 × user_growth_component
-       + 0.25 × quality_component
-       + 0.20 × efficiency_component
-       − 0.15 × (1 if invalid action)
-```
-
-All components normalised to [0, 1]. Total reward in [0, 1].
-
-## Tasks
-
-| Task | Difficulty | Budget | Competition | Goal |
-|------|-----------|--------|-------------|------|
-| MVP Launch | 🟢 Easy | $120k | 15% | Ship product + revenue > $3k/wk |
-| Growth Phase | 🟡 Medium | $350k | 40% | Scale users + revenue |
-| Survival Mode | 🔴 Hard | $80k | 70% | Survive + maintain growth |
-
-## Stochastic Events
-
-`viral_growth` 🚀 · `server_crash` 💥 · `competitor_launch` ⚔️ · `press_coverage` 📰 · `economic_downturn` 📉 · `key_employee_left` 👋
-                """)
-
-        gr.Markdown(
-            "<center style='color:#555;font-size:0.85em;'>OpenEnv-Compatible · Docker Space · "
-            "<a href='https://github.com/Myst-12/AI-Startup-Decision-Simulator' target='_blank'>GitHub</a></center>"
+        task_select.change(fn=update_desc, inputs=task_select, outputs=mission_desc)
+        
+        run_btn.click(
+            fn=run_task_streaming,
+            inputs=task_select,
+            outputs=[m_budget, m_revenue, m_growth, m_quality, chart, event_alert, insight_panel, results_panel, reset_btn]
         )
+        
+        reset_btn.click(lambda: (0, 0, 0, 0, pd.DataFrame(), "", "", "", gr.update(visible=False)), 
+                        outputs=[m_budget, m_revenue, m_growth, m_quality, chart, event_alert, insight_panel, results_panel, reset_btn])
 
     return demo
-
 
 if __name__ == "__main__":
     demo = build_ui()

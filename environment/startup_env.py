@@ -223,22 +223,29 @@ class StartupEnv:
         if not action_valid:
             self._invalid_actions += 1
             penalty = 0.15  # penalise invalid choices
+            info["why"] = [f"Action rejected: {action_msg}"]
+        else:
+            info["why"] = []
 
         if action_valid:
-            self._apply_action(action)
+            action_expl = self._apply_action(action)
+            info["why"].extend(action_expl)
 
         # 2. Compute weekly burn rate
         burn = self._compute_burn_rate()
         self._obs.metrics.burn_rate = burn
 
         # 3. Simulate business dynamics
-        self._simulate_dynamics()
+        dynamics_expl = self._simulate_dynamics()
+        info["why"].extend(dynamics_expl)
 
         # 4. Inject stochastic event
         event = _pick_event(self._rng)
         self._apply_event(event)
         self._obs.pending_events = [event] if event != "none" else []
         info["event"] = event
+        if event != "none":
+            info["why"].append(f"Stochastic event occurred: {event}")
 
         # 5. Deduct burn from budget
         self._obs.budget = max(0.0, self._obs.budget - burn)
@@ -253,6 +260,8 @@ class StartupEnv:
         done = self._check_done()
         self._done = done
         info["done_reason"] = self._done_reason() if done else None
+        if done:
+            info["why"].append(f"Simulation ended: {info['done_reason']}")
 
         obs_snapshot = copy.deepcopy(self._obs)
         self._history.append({"obs": obs_snapshot, "reward": reward, "action": action, "info": info})
@@ -321,27 +330,34 @@ class StartupEnv:
     # Action effects
     # ------------------------------------------------------------------
 
-    def _apply_action(self, action: Action) -> None:
+    def _apply_action(self, action: Action) -> List[str]:
         obs = self._obs
         pld = action.payload
+        exps = []
 
         if action.type == "hire":
             role: str = pld.role
             setattr(obs.team, f"{role}s", getattr(obs.team, f"{role}s") + 1)
             obs.budget -= HIRING_COST  # one-time hiring cost
+            exps.append(f"Hired {role}. Budget -$5,000. Burn rate +${self._weekly_salary_for_role(role):,.0f}.")
 
         elif action.type == "fire":
             role = pld.role
             current = getattr(obs.team, f"{role}s")
             setattr(obs.team, f"{role}s", max(0, current - 1))
+            exps.append(f"Fired {role}. Burn rate lowered.")
 
         elif action.type == "build_feature":
             obs.product.features_built.append(pld.feature_name)
+            prev_q = obs.product.quality
             obs.product.quality = _clamp(obs.product.quality + FEATURE_QUALITY_GAIN, 0.0, 1.0)
             obs.budget -= FEATURE_BUILD_COST
+            exps.append(f"Shipped '{pld.feature_name}'. Budget -$8,000. Quality +{obs.product.quality - prev_q:.2f}.")
             # Designer bonus
             if obs.team.designers > 0:
-                obs.product.quality = _clamp(obs.product.quality + 0.02 * obs.team.designers, 0.0, 1.0)
+                bonus = 0.02 * obs.team.designers
+                obs.product.quality = _clamp(obs.product.quality + bonus, 0.0, 1.0)
+                exps.append(f"Designer bonus: Quality +{bonus:.2f}.")
 
         elif action.type == "marketing":
             spend: float = pld.budget
@@ -353,25 +369,31 @@ class StartupEnv:
             if obs.team.marketers > 0:
                 growth_lift *= (1.0 + 0.2 * obs.team.marketers)
             obs.metrics.user_growth = max(0.0, obs.metrics.user_growth + growth_lift)
+            exps.append(f"Marketing spend of ${spend:,.0f} boosted demand and user growth.")
 
         elif action.type == "pivot":
             obs.market.trend = pld.new_trend
             # Pivot costs some quality (distraction) but can unlock higher demand
             obs.product.quality = _clamp(obs.product.quality - 0.05, 0.0, 1.0)
             obs.market.demand = _clamp(obs.market.demand + 0.10, 0.0, 1.0)
+            exps.append(f"Pivoted to {pld.new_trend}. Market demand +0.10, but distracted team (Quality -0.05).")
 
         elif action.type == "wait":
-            pass  # intentional no-op
+            exps.append("Waited. Operation as usual.")
+        
+        return exps
 
     # ------------------------------------------------------------------
     # Business dynamics
     # ------------------------------------------------------------------
 
-    def _simulate_dynamics(self) -> None:
+    def _simulate_dynamics(self) -> List[str]:
         obs = self._obs
+        exps = []
 
         # ----- Revenue model -----
         if obs.product.is_launched:
+            prev_rev = obs.metrics.revenue
             base_rev = (
                 obs.product.quality
                 * obs.market.demand
@@ -381,11 +403,15 @@ class StartupEnv:
             )
             # Revenue smoothly converges toward base_rev
             obs.metrics.revenue = obs.metrics.revenue * 0.6 + base_rev * 0.4
+            delta = obs.metrics.revenue - prev_rev
+            if abs(delta) > 100:
+                exps.append(f"Revenue {'grew' if delta > 0 else 'fell'} by ${abs(delta):,.0f} due to market dynamics.")
         else:
             obs.metrics.revenue = 0.0
 
         # ----- User growth model -----
         if obs.product.is_launched:
+            prev_ug = obs.metrics.user_growth
             natural_growth = (
                 obs.market.demand
                 * obs.product.quality
@@ -394,6 +420,8 @@ class StartupEnv:
             )
             natural_growth -= obs.market.competition * 2.0
             obs.metrics.user_growth = max(0.0, obs.metrics.user_growth * 0.8 + natural_growth * 0.2)
+            if abs(obs.metrics.user_growth - prev_ug) > 0.5:
+                exps.append("User growth rate shifted due to quality and competition.")
         else:
             obs.metrics.user_growth = 0.0
 
@@ -404,6 +432,8 @@ class StartupEnv:
         # ----- Demand mean-reversion -----
         mean_demand = 0.5
         obs.market.demand = _clamp(obs.market.demand + 0.02 * (mean_demand - obs.market.demand), 0.0, 1.0)
+        
+        return exps
 
     def _apply_event(self, event: str) -> None:
         obs = self._obs

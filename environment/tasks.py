@@ -49,14 +49,17 @@ def _survived(history: List[Dict[str, Any]]) -> bool:
 # Task 1 — EASY: "MVP Launch"
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Task 1 — EASY: "MVP Launch"
+# ---------------------------------------------------------------------------
+
 TASK_MVP_LAUNCH: Dict[str, Any] = {
     "name": "mvp_launch",
     "display_name": "MVP Launch",
     "difficulty": "easy",
     "description": (
-        "You are a solo founder with a modest seed round. Your goal is to build a "
-        "minimum viable product, ship at least one feature, and generate initial revenue "
-        "before your budget runs out. Competition is low and the market is receptive."
+        "You are a solo founder with a modest seed round. Goal: Build an MVP, ship features, "
+        "and hit $5k revenue without going bankrupt. Competition is low."
     ),
     "config": {
         "initial_budget": 120_000.0,
@@ -79,34 +82,19 @@ TASK_MVP_LAUNCH: Dict[str, Any] = {
 
 
 def grade_mvp_launch(history: List[Dict[str, Any]]) -> float:
-    """
-    Grader for MVP Launch.
-
-    score = 1.0 if:
-      - Product has at least 1 feature shipped
-      - Revenue > $3,000/week at any point in the episode
-
-    Partial credit for partial completion.
-    """
-    if not history:
-        return 0.0
-
-    obs = _last_obs(history)
-    max_rev = _max_revenue(history)
-
-    product_score = 1.0 if obs.product.features_built else 0.0
-    revenue_threshold = 3_000.0
-    revenue_score = _normalize(max_rev, 0.0, revenue_threshold)
-
-    # Binary bonus if both conditions simultaneously held at some point
-    joint_bonus = 0.0
-    for step in history:
-        o = step["obs"]
-        if o.product.features_built and o.metrics.revenue >= revenue_threshold:
-            joint_bonus = 0.2
-            break
-
-    raw = 0.4 * product_score + 0.4 * revenue_score + joint_bonus
+    if not history: return 0.0
+    
+    # Components
+    survival_val = 1.0 if _survived(history) else 0.0
+    
+    # Target: $5,000 revenue
+    rev_score = _normalize(_max_revenue(history), 0.0, 5_000.0)
+    
+    # Target: 8% natural user growth (easy)
+    ug_score = _normalize(_max_user_growth(history), 0.0, 8.0)
+    
+    # Formula: 0.4*Surv + 0.3*Rev + 0.3*Growth
+    raw = 0.4 * survival_val + 0.3 * rev_score + 0.3 * ug_score
     return round(min(1.0, raw), 4)
 
 
@@ -119,9 +107,8 @@ TASK_GROWTH_PHASE: Dict[str, Any] = {
     "display_name": "Growth Phase",
     "difficulty": "medium",
     "description": (
-        "You have a launched product with a small but active user base. Your goal is to "
-        "aggressively grow users and revenue over 36 weeks. Competition is moderate and "
-        "increasing. Hiring, marketing, and smart feature development are key."
+        "Launched product with traction. Goal: Scale users to 15% growth and $20k revenue. "
+        "Competition is moderate. Don't run out of cash!"
     ),
     "config": {
         "initial_budget": 350_000.0,
@@ -133,7 +120,7 @@ TASK_GROWTH_PHASE: Dict[str, Any] = {
         "initial_trend": "enterprise_saas",
         "initial_quality": 0.30,
         "initial_revenue": 5_000.0,
-        "initial_user_growth": 5.0,
+        "initial_user_growth": 4.0,
         "initial_burn_rate": 0.0,
         "initial_features": ["core_dashboard"],
         "max_weeks": 36,
@@ -144,29 +131,17 @@ TASK_GROWTH_PHASE: Dict[str, Any] = {
 
 
 def grade_growth_phase(history: List[Dict[str, Any]]) -> float:
-    """
-    Grader for Growth Phase.
+    if not history: return 0.0
 
-    score = normalised(user_growth_peak + revenue_peak)
+    survival_val = 1.0 if _survived(history) else 0.0
+    
+    # Target: $20,000 revenue
+    rev_score = _normalize(_max_revenue(history), 5_000.0, 20_000.0)
+    
+    # Target: 15% user growth
+    ug_score = _normalize(_max_user_growth(history), 4.0, 15.0)
 
-    Targets: user_growth_peak >= 20%/week, revenue_peak >= $20,000/week
-    """
-    if not history:
-        return 0.0
-
-    max_rev = _max_revenue(history)
-    max_ug = _max_user_growth(history)
-
-    # Number of features built (measures product investment)
-    obs = _last_obs(history)
-    feature_count = len(obs.product.features_built)
-
-    rev_score = _normalize(max_rev, 5_000.0, 20_000.0)          # 0 at $5k, 1 at $20k
-    ug_score = _normalize(max_ug, 5.0, 20.0)                    # 0 at 5%, 1 at 20%
-    feat_score = _normalize(feature_count, 1.0, 6.0)             # 0 at 1, 1 at 6
-    survival = 1.0 if _survived(history) else 0.5
-
-    raw = 0.35 * rev_score + 0.35 * ug_score + 0.20 * feat_score + 0.10 * survival
+    raw = 0.4 * survival_val + 0.3 * rev_score + 0.3 * ug_score
     return round(min(1.0, raw), 4)
 
 
@@ -179,9 +154,8 @@ TASK_SURVIVAL_MODE: Dict[str, Any] = {
     "display_name": "Survival Mode",
     "difficulty": "hard",
     "description": (
-        "Your startup is in crisis. Budget is critically low, competition is fierce, "
-        "and disruptive market events happen frequently. You must survive, maintain "
-        "revenue, and grow users under extreme adversity over 48 weeks. Every decision counts."
+        "Crisis mode. Budget low, competition high. Goal: Survive 48 weeks and "
+        "rebuild revenue to $10k. Frequent disruptive events."
     ),
     "config": {
         "initial_budget": 80_000.0,
@@ -204,36 +178,19 @@ TASK_SURVIVAL_MODE: Dict[str, Any] = {
 
 
 def grade_survival_mode(history: List[Dict[str, Any]]) -> float:
-    """
-    Grader for Survival Mode (weighted multi-objective).
+    if not history: return 0.0
 
-    Components:
-      - survival (not bankrupt at end): 30%
-      - revenue maintained / grown: 30%
-      - user growth maintained: 25%
-      - weeks survived: 15%
+    survival_val = 1.0 if _survived(history) else 0.0
+    
+    # Target: $10,000 revenue (from $2k)
+    rev_score = _normalize(_max_revenue(history), 2_000.0, 10_000.0)
+    
+    # Target: 10% user growth
+    ug_score = _normalize(_max_user_growth(history), 2.0, 10.0)
 
-    All normalised to [0, 1].
-    """
-    if not history:
-        return 0.0
-
-    obs = _last_obs(history)
-    weeks_survived = len(history)
-    max_weeks = obs.time.max_weeks
-
-    survival_score = 1.0 if _survived(history) else 0.0
-    rev_score = _normalize(_max_revenue(history), 2_000.0, 15_000.0)
-    ug_score = _normalize(_max_user_growth(history), 2.0, 15.0)
-    duration_score = _normalize(weeks_survived, 10, max_weeks)
-
-    raw = (
-        0.30 * survival_score
-        + 0.30 * rev_score
-        + 0.25 * ug_score
-        + 0.15 * duration_score
-    )
+    raw = 0.4 * survival_val + 0.3 * rev_score + 0.3 * ug_score
     return round(min(1.0, raw), 4)
+
 
 
 # ---------------------------------------------------------------------------

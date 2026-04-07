@@ -17,7 +17,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Load .env file if present (for local development)
 try:
@@ -66,36 +66,25 @@ SYSTEM_PROMPT = """You are an experienced startup founder and CEO making strateg
 You receive the current state of your startup as a JSON object and must return exactly ONE action as JSON.
 
 RULES:
-1. Your response must be ONLY a valid JSON object with keys "type" and "payload".
-2. Do NOT include explanations or markdown formatting — only the raw JSON object.
-3. Choose the action that maximises long-term success, not just short-term gains.
+1. Your response must be a JSON object with keys "type", "payload", and "reasoning".
+2. "reasoning" should be a short (1-sentence) explanation of your strategy for this step.
+3. Do NOT include other text — only the JSON object.
 
 AVAILABLE ACTIONS:
-- hire: {"type": "hire", "payload": {"role": "engineer"|"designer"|"marketer"}}
-- fire: {"type": "fire", "payload": {"role": "engineer"|"designer"|"marketer"}}
-- build_feature: {"type": "build_feature", "payload": {"feature_name": "<unique name>"}}
-- marketing: {"type": "marketing", "payload": {"budget": <float >= 500.0>}}
-- pivot: {"type": "pivot", "payload": {"new_trend": "AI/ML"|"sustainability"|"consumer_health"|"fintech"|"enterprise_saas"|"creator_economy"|"web3"|"edtech"|"stable"}}
-- wait: {"type": "wait", "payload": {}}
-
-STRATEGY GUIDELINES:
-- Build features before spending on marketing (product must exist first).
-- Maintain at least 2 engineers to keep building.
-- Watch your burn rate vs revenue — efficient spending is rewarded.
-- Respond to events: viral_growth → invest in marketing; server_crash → improve quality.
-- Pivot when the current trend is misaligned with your product's strengths.
+- hire: {"type": "hire", "payload": {"role": "engineer"|"designer"|"marketer"}, "reasoning": "..."}
+- fire: {"type": "fire", "payload": {"role": "engineer"|"designer"|"marketer"}, "reasoning": "..."}
+- build_feature: {"type": "build_feature", "payload": {"feature_name": "<name>"}, "reasoning": "..."}
+- marketing: {"type": "marketing", "payload": {"budget": <float>}, "reasoning": "..."}
+- pivot: {"type": "pivot", "payload": {"new_trend": "<trend>"}, "reasoning": "..."}
+- wait: {"type": "wait", "payload": {}, "reasoning": "..."}
 """
 
 
 def build_user_prompt(obs_dict: Dict[str, Any], task_description: str, week: int, max_weeks: int) -> str:
     return f"""TASK: {task_description}
-
 WEEK {week}/{max_weeks}
-
-CURRENT STATE:
-{json.dumps(obs_dict, indent=2)}
-
-Based on this state, what is your action for this week? Return ONLY the JSON action object."""
+STATE: {json.dumps(obs_dict)}
+Return JSON action with reasoning:"""
 
 
 # ---------------------------------------------------------------------------
@@ -108,10 +97,9 @@ def get_llm_action(
     week: int,
     max_weeks: int,
     retries: int = 3,
-) -> Optional[Action]:
+) -> Tuple[Optional[Action], str]:
     """
-    Call the LLM to get an action. Returns None if all retries fail.
-    Falls back to a safe DEFAULT action on parse failures.
+    Call the LLM to get an action. Returns (Action, reasoning).
     """
     user_prompt = build_user_prompt(obs_dict, task_description, week, max_weeks)
     last_error: Optional[Exception] = None
@@ -129,37 +117,22 @@ def get_llm_action(
             )
             raw = response.choices[0].message.content.strip()
 
-            # Strip markdown code fences if present
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
+                if raw.startswith("json"): raw = raw[4:]
                 raw = raw.strip()
 
             action_dict = json.loads(raw)
-            return Action.from_dict(action_dict)
+            return Action.from_dict(action_dict), action_dict.get("reasoning", "")
 
         except Exception as exc:
             last_error = exc
-            time.sleep(2 ** attempt)  # exponential backoff
+            time.sleep(1)
 
-    print(f"  [WARN] LLM failed after {retries} attempts: {last_error}. Using fallback action.")
-    return _fallback_action(obs_dict)
+    return _fallback_action(obs_dict), "fallback"
 
 
 def _fallback_action(obs_dict: Dict[str, Any]) -> Action:
-    """
-    Deterministic fallback action when the LLM fails.
-    Prefers building a feature if budget allows, else waits.
-    """
-    budget = obs_dict.get("budget", 0)
-    features = obs_dict.get("product", {}).get("features_built", [])
-    engineers = obs_dict.get("team", {}).get("engineers", 0)
-
-    if engineers >= 1 and budget >= 8_000 and len(features) < 5:
-        feature_name = f"feature_v{len(features) + 1}"
-        return Action.from_dict({"type": "build_feature", "payload": {"feature_name": feature_name}})
-
     return Action.from_dict({"type": "wait", "payload": {}})
 
 
@@ -168,18 +141,13 @@ def _fallback_action(obs_dict: Dict[str, Any]) -> Action:
 # ---------------------------------------------------------------------------
 
 def run_task(task_cfg: Dict[str, Any], grader_fn, step_limit: int = MAX_STEPS_PER_TASK) -> Dict[str, Any]:
-    """
-    Run one full episode for the given task. Logs in required format.
-    Returns result dict with final score and stats.
-    """
     task_name = task_cfg["display_name"]
     task_description = task_cfg["description"]
     config = task_cfg["config"]
     difficulty = task_cfg["difficulty"]
 
     print(f"\n[START] task={task_name!r} difficulty={difficulty!r} model={MODEL_NAME!r}")
-    print(f"[START] config={json.dumps({k: v for k, v in config.items() if k != 'seed'}, separators=(',', ':'))}")
-
+    
     env = StartupEnv(config=config)
     obs = env.reset()
 
@@ -191,32 +159,27 @@ def run_task(task_cfg: Dict[str, Any], grader_fn, step_limit: int = MAX_STEPS_PE
     while not done and step < step_limit:
         step += 1
         obs_dict = obs.model_dump()
-        action = get_llm_action(
+        action, reasoning = get_llm_action(
             obs_dict=obs_dict,
             task_description=task_description,
             week=obs.time.current_week,
             max_weeks=obs.time.max_weeks,
         )
 
-        if action is None:
-            action = Action.from_dict({"type": "wait", "payload": {}})
-
         obs, reward, done, info = env.step(action)
         total_reward += reward.total
         history.append({"obs": obs, "reward": reward, "action": action, "info": info})
 
-        events_str = ", ".join(obs.pending_events) if obs.pending_events else "none"
         print(
-            f"[STEP] week={obs.time.current_week - 1:02d} "
+            f"[STEP] week={obs.time.current_week-1:02d} "
             f"action={action.type!r} "
+            f"reasoning={reasoning!r} "
             f"reward={reward.total:.4f} "
             f"budget={obs.budget:.0f} "
-            f"revenue={obs.metrics.revenue:.0f} "
-            f"user_growth={obs.metrics.user_growth:.1f}% "
-            f"quality={obs.product.quality:.2f} "
-            f"event={events_str!r} "
+            f"rev={obs.metrics.revenue:.0f} "
             f"done={done}"
         )
+
 
     # Compute grader score from history
     grader_score = grader_fn(history)
