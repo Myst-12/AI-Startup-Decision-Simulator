@@ -1,4 +1,21 @@
-# Startup Decision Simulator
+---
+title: AI Startup Decision Simulator
+emoji: 🚀
+colorFrom: violet
+colorTo: cyan
+sdk: docker
+app_port: 7860
+pinned: true
+tags:
+  - openenv
+  - ai-agent
+  - startup
+  - decision-making
+  - llm
+  - benchmark
+---
+
+
 ### OpenEnv-Compatible AI Agent Benchmark Environment
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
