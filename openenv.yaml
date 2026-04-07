@@ -1,0 +1,167 @@
+name: startup-decision-simulator
+version: "1.0.0"
+description: >
+  A production-ready OpenEnv-compatible environment that simulates a real-world
+  startup where an AI agent acts as a founder making sequential weekly decisions
+  to maximise long-term success. The agent manages budget allocation, hiring/firing,
+  feature development, marketing spend, and strategic pivots over a multi-week episode.
+
+author: "Scalar Hackathon Team"
+license: MIT
+tags:
+  - startup
+  - decision-making
+  - multi-step
+  - business-simulation
+  - strategic-planning
+
+# ── OpenEnv Interface ────────────────────────────────────────────────────────
+interface:
+  reset: "environment.startup_env.StartupEnv.reset"
+  step: "environment.startup_env.StartupEnv.step"
+  state: "environment.startup_env.StartupEnv.state"
+
+# ── Observation Schema ────────────────────────────────────────────────────────
+observation:
+  type: object
+  schema_class: "environment.models.Observation"
+  fields:
+    budget:
+      type: float
+      description: "Remaining cash budget in USD"
+    team:
+      type: object
+      fields:
+        engineers: {type: int, min: 0}
+        designers: {type: int, min: 0}
+        marketers: {type: int, min: 0}
+    product:
+      type: object
+      fields:
+        features_built: {type: array, items: string}
+        quality: {type: float, min: 0.0, max: 1.0}
+    market:
+      type: object
+      fields:
+        demand: {type: float, min: 0.0, max: 1.0}
+        competition: {type: float, min: 0.0, max: 1.0}
+        trend: {type: string}
+    metrics:
+      type: object
+      fields:
+        revenue: {type: float, min: 0.0}
+        burn_rate: {type: float, min: 0.0}
+        user_growth: {type: float, min: 0.0}
+    time:
+      type: object
+      fields:
+        current_week: {type: int, min: 1}
+        max_weeks: {type: int, min: 1}
+    pending_events:
+      type: array
+      items: string
+      description: "Active environmental events this week"
+
+# ── Action Schema ─────────────────────────────────────────────────────────────
+action:
+  type: object
+  schema_class: "environment.models.Action"
+  fields:
+    type:
+      type: string
+      enum: ["hire", "fire", "build_feature", "marketing", "pivot", "wait"]
+    payload:
+      type: object
+      description: "Varies by action type. See payloads below."
+  payloads:
+    hire:
+      role: {type: string, enum: ["engineer", "designer", "marketer"]}
+    fire:
+      role: {type: string, enum: ["engineer", "designer", "marketer"]}
+    build_feature:
+      feature_name: {type: string, min_length: 2, max_length: 64}
+    marketing:
+      budget: {type: float, min: 500.0}
+    pivot:
+      new_trend: {type: string}
+    wait: {}
+
+# ── Reward Schema ─────────────────────────────────────────────────────────────
+reward:
+  type: object
+  schema_class: "environment.models.Reward"
+  range: [0.0, 1.0]
+  dense: true
+  fields:
+    total: {type: float, min: 0.0, max: 1.0}
+    revenue_component: {type: float}
+    user_growth_component: {type: float}
+    quality_component: {type: float}
+    efficiency_component: {type: float}
+    penalty: {type: float}
+    info: {type: object}
+
+# ── Tasks ─────────────────────────────────────────────────────────────────────
+tasks:
+  - id: mvp_launch
+    display_name: "MVP Launch"
+    difficulty: easy
+    grader: "environment.tasks.grade_mvp_launch"
+    description: >
+      Small seed budget, low competition. Build an MVP and generate initial revenue.
+    config_key: "environment.tasks.TASK_MVP_LAUNCH"
+
+  - id: growth_phase
+    display_name: "Growth Phase"
+    difficulty: medium
+    grader: "environment.tasks.grade_growth_phase"
+    description: >
+      Existing product, moderate competition. Scale users and revenue aggressively.
+    config_key: "environment.tasks.TASK_GROWTH_PHASE"
+
+  - id: survival_mode
+    display_name: "Survival Mode"
+    difficulty: hard
+    grader: "environment.tasks.grade_survival_mode"
+    description: >
+      Low budget, high competition, random disruptive events. Survive and grow.
+    config_key: "environment.tasks.TASK_SURVIVAL_MODE"
+
+# ── Termination Conditions ────────────────────────────────────────────────────
+termination:
+  conditions:
+    - id: bankruptcy
+      description: "Budget <= 0"
+    - id: max_weeks_reached
+      description: "Current week > max_weeks"
+    - id: success_milestone
+      description: "Revenue >= $100,000/week AND quality >= 0.9"
+
+# ── Runtime Requirements ───────────────────────────────────────────────────────
+runtime:
+  vcpu: 2
+  ram_gb: 8
+  max_episode_minutes: 20
+  python: ">=3.10"
+
+# ── Environment Variables ──────────────────────────────────────────────────────
+environment_variables:
+  API_BASE_URL:
+    required: false
+    default: "https://api.openai.com/v1"
+    description: "OpenAI-compatible API base URL"
+  MODEL_NAME:
+    required: false
+    default: "gpt-4o-mini"
+    description: "LLM model identifier"
+  HF_TOKEN:
+    required: true
+    description: "Hugging Face token used as API key"
+
+# ── Inference ─────────────────────────────────────────────────────────────────
+inference:
+  entrypoint: "inference.py"
+  command: "python inference.py"
+  logging:
+    format: "[START] ... [STEP] ... [END] ..."
+    tags: ["START", "STEP", "END", "WARN", "ERROR"]
