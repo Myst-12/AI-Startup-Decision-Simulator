@@ -148,11 +148,11 @@ runtime:
 environment_variables:
   API_BASE_URL:
     required: false
-    default: "https://api.openai.com/v1"
+    default: "https://router.huggingface.co/v1"
     description: "OpenAI-compatible API base URL"
   MODEL_NAME:
     required: false
-    default: "gpt-4o-mini"
+    default: "Qwen/Qwen2.5-72B-Instruct"
     description: "LLM model identifier"
   HF_TOKEN:
     required: true
@@ -164,4 +164,4 @@ inference:
   command: "python inference.py"
   logging:
     format: "[START] ... [STEP] ... [END] ..."
-    tags: ["START", "STEP", "END", "WARN", "ERROR"]
+    tags: ["START", "STEP", "END"]

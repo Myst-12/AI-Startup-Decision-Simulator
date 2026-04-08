@@ -1,4 +1,5 @@
 .env
+.venv-openenv-check/
 __pycache__/
 *.pyc
 *.pyo

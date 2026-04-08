@@ -148,9 +148,9 @@ cd startup-decision-simulator
 pip install -r requirements.txt
 
 # Set environment variables
-export API_BASE_URL="https://api.openai.com/v1"
-export MODEL_NAME="gpt-4o-mini"
-export HF_TOKEN="your_api_key_here"
+export API_BASE_URL="https://router.huggingface.co/v1"
+export MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
+export HF_TOKEN="your_hugging_face_token"
 ```
 
 ---
@@ -171,20 +171,20 @@ docker build -t startup-simulator .
 
 # Run
 docker run \
-  -e API_BASE_URL="https://api.openai.com/v1" \
-  -e MODEL_NAME="gpt-4o-mini" \
-  -e HF_TOKEN="your_api_key_here" \
+  -e API_BASE_URL="https://router.huggingface.co/v1" \
+  -e MODEL_NAME="Qwen/Qwen2.5-72B-Instruct" \
+  -e HF_TOKEN="your_hugging_face_token" \
   startup-simulator
 ```
 
 ### Expected Log Format
 
 ```
-[START] task='MVP Launch' difficulty='easy' model='gpt-4o-mini'
-[STEP] week=01 action='build_feature' reward=0.1823 budget=112000 revenue=0 user_growth=0.0% quality=0.08 event='none' done=False
-[STEP] week=02 action='hire' reward=0.2104 budget=103000 revenue=1200 user_growth=1.2% quality=0.08 event='press_coverage' done=False
+[START] task=mvp_launch env=startup-decision-simulator model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action={"type":"build_feature","payload":{"feature_name":"mvp_week_1"}} reward=0.13 done=false error=null
+[STEP] step=2 action={"type":"marketing","payload":{"budget":1000.0}} reward=0.19 done=false error=null
 ...
-[END] task='MVP Launch' grader_score=0.6240 avg_reward=0.2850 steps=18 done_reason='max_weeks_reached'
+[END] success=true steps=18 score=0.624 rewards=0.13,0.19,...
 ```
 
 ---

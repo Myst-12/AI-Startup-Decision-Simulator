@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "startup-decision-simulator"
+version = "1.0.0"
+description = "OpenEnv-compatible startup decision simulator with HTTP endpoints and Gradio UI."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "gradio>=4.0.0",
+    "groq>=0.11.0",
+    "openai>=1.10.0",
+    "openenv-core[core]>=0.2.2",
+    "pandas>=2.0.0",
+    "pydantic>=2.0.0,<3.0.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.scripts]
+server = "server.app:main"
+
+[tool.setuptools]
+py-modules = ["app", "inference"]
+
+[tool.setuptools.packages.find]
+include = ["environment*", "server*"]
